@@ -8,6 +8,6 @@ Written in Javascript as this code is ultimately going to find its way into [Jes
 
   - <del>fix argument passing for function calls</del>
   - <del>function calls working (without closures)</del>
-  - closures working (get upval)
+  - <del>closures working (get upval)</del>
   - closures working (set upval)
   - nested closures working
