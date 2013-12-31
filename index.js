@@ -8,7 +8,8 @@ var OP_MAKE_FUNCTION    = 1,
     OP_SET_UPVAL        = 6,
     OP_LOAD_CONSTANT    = 7,
     OP_CALL             = 8,
-    OP_HALT             = 9;
+    OP_COPY             = 9,
+    OP_HALT             = 10;
 
 var T_CODE_OBJECT       = 1,
     T_FUNCTION          = 2,
@@ -28,10 +29,13 @@ function makeUpval(stack, offset) {
     }
 
     function get() {
+        console.log("getting upval, closed = " + closed);
         return closed ? value : stack[offset];
     }
 
     function close() {
+
+        console.log("closing upval...");
         
         if (closed)
             throw new Error("upval already closed!");
@@ -43,9 +47,12 @@ function makeUpval(stack, offset) {
 
     return {
         __jtype     : T_UPVAL,
+        offset      : offset,
         set         : set,
         get         : get,
-        close       : close
+        close       : close,
+        prev        : null,
+        next        : null
     };
 
 }
@@ -66,63 +73,45 @@ function makeFunction(codeObject) {
     };
 }
 
-// // register 0 - param x
-// var add2 = makeCodeObject([
-//     { op: OP_MAKE_FUNCTION, targetRegister: 1, codeObject: add1 },
-
-//     // indicate that upval 0 for previous function corresponds to stack offset 0
-//     // TODO: we need to work out how to compile this; is it possible from the AST?
-//     { op: OP_BIND, upvalIndex: 0, stackOffset: 0 },
-    
-//     { op: OP_RETURN, register: 1 }
-// ], {
-//     stackSize: 2
-// });
-
-// // register 0 - param y
-// var add1 = makeCodeObject([
-//     { op: OP_GET_UPVAL, upval: 0, targetRegister: 1 },
-//     { op: OP_ADD, targetRegister: 2, sourceRegisterA: 0, sourceRegisterB: 0 },
-//     { op: OP_RETURN, register: 2 }
-// ], {
-//     stackSize: 3
-// });
-
-// var body = makeCodeObject([
-//     { op: OP_MAKE_FUNCTION, targetRegister: 0, codeObject: add2 },
-//     { op: OP_LOAD_CONSTANT, targetRegister: 1, value: 10 },
-//     { op: OP_CALL, fnRegister: 0, argBase: 1, nArgs: 1, resultRegister: 2 },
-//     { op: OP_LOAD_CONSTANT, targetRegister: 3, value: 20 },
-//     { op: OP_CALL, fnRegister: 2, argBase: 3, nArgs: 1, resultRegister: 4 },
-//     { op: OP_HALT }
-// ], {
-//     stackSize: 5
-// });
-
-//
-// Simple adder
-
 // r0 - return value
-// r1 - param 1
-// r2 - param 2
-// r3 - target value
-var adder = makeCodeObject([
+// r1 - parameter
+// r2 - upval tmp
+// r3 - result tmp
+var add1 = makeCodeObject([
+    { op: OP_GET_UPVAL, upval: 0, targetRegister: 2 },
     { op: OP_ADD, targetRegister: 3, sourceRegisterA: 1, sourceRegisterB: 2 },
     { op: OP_RETURN, register: 3 }
 ], {
     stackSize: 4
 });
 
+// r0 - return value
+// r1 - parameter
+// r2 - add1
+var add2 = makeCodeObject([
+    { op: OP_MAKE_FUNCTION, targetRegister: 2, codeObject: add1 },
+
+    // indicate that upval 0 for previous function corresponds to stack offset 0
+    // TODO: we need to work out how to derive/compile this; is it possible from the AST?
+    { op: OP_BIND, upvalIndex: 0, stackOffset: 1 },
+    
+    { op: OP_RETURN, register: 2 }
+], {
+    stackSize: 3
+});
+
 // r0 - unused (return register)
-// r1 - adder fn
-// r2 - receives function call result
-// r3 - 10
-// r4 - 5
+// r1 - add2 fn
+// r2 - copy return value in here
+// r3 - receives fn call result
+// r4 - fn arg
 var body = makeCodeObject([
-    { op: OP_MAKE_FUNCTION, targetRegister: 1, codeObject: adder },
-    { op: OP_LOAD_CONSTANT, targetRegister: 3, value: 10 },
-    { op: OP_LOAD_CONSTANT, targetRegister: 4, value: 5 },
-    { op: OP_CALL, fnRegister: 1, argBase: 2, nArgs: 2 },
+    { op: OP_MAKE_FUNCTION, targetRegister: 1, codeObject: add2 },
+    { op: OP_LOAD_CONSTANT, targetRegister: 4, value: 7 },
+    { op: OP_CALL, fnRegister: 1, argBase: 3, nArgs: 1 },
+    { op: OP_COPY, sourceRegister: 3, targetRegister: 2 },
+    { op: OP_LOAD_CONSTANT, targetRegister: 4, value: 2 },
+    { op: OP_CALL, fnRegister: 2, argBase: 3, nArgs: 1 },
     { op: OP_HALT }
 ], {
     stackSize: 5
@@ -136,7 +125,7 @@ function dumpState() {
     console.log("---------------");
 
     for (var i = 0; i < f.fn.co.stackSize; ++i) {
-        console.log((f.bp + i) + ": " + stack[f.bp + i]);
+        console.log((f.bp + i) + ": " + util.inspect(stack[f.bp + i]));
     }
 }
 
@@ -145,13 +134,19 @@ function dumpState() {
 
 var main = makeFunction(body);
 
-var stack = new Array(2048);
+var stack = new Array(64);
+
+// last function instance created, for use with OP_BIND
+var lastFn = null;
 
 var initialFrame = {
-    ip      : 0,
-    bp      : 0,
-    fn      : main,
+    ip          : 0,
+    bp          : 0,
+    fn          : main
 };
+
+var upvalHead = null,
+    upvalTail = null;
 
 var frames = [initialFrame];
 
@@ -163,34 +158,93 @@ while (true) {
 
     switch (inst.op) {
         case OP_MAKE_FUNCTION:
-            stack[f.bp + inst.targetRegister] = makeFunction(inst.codeObject);
+            stack[f.bp + inst.targetRegister] = lastFn = makeFunction(inst.codeObject);
             break;
         case OP_BIND:
-            // insert an upval into the last function and bind it to the stack
-            // also, add it to the list of open upvals + set up the root pointer
+
+            var found = false;
+
+            // Look for existing open upval pointing to same stack offset and reuse if found.
+            // TODO: is it more performant to walk this in reverse order?
+            // I guess it will come down to heuristics, but intuition says yes.
+            var curr = upvalHead;
+            while (curr) {
+                if (curr.offset === inst.stackOffset) {
+                    lastFn.upvals[inst.upvalIndex] = curr;
+                    found = true;
+                    break;
+                }
+                curr = curr.next;
+            }
+
+            if (!found) {
+                var upval = makeUpval(stack, f.bp + inst.stackOffset);
+                lastFn.upvals[inst.upvalIndex] = upval;
+                if (upvalHead === null) {
+                    upvalHead = upvalTail = upval;
+                } else {
+                    upvalTail.next = upval;
+                    upval.prev = upvalTail;
+                    upvalTail = upval;
+                }
+            }
+
             break;
+
         case OP_ADD:
             stack[f.bp + inst.targetRegister] = stack[f.bp + inst.sourceRegisterA] + stack[f.bp + inst.sourceRegisterB];
             break;
         case OP_RETURN:
 
             stack[f.bp] = stack[f.bp + inst.register];
+
+            //
+            // we're returning from a function so any upvals pointing to any stack
+            // offsets >= f.bp must be closed as they're about to become invalid.
+
+            var curr = upvalTail;
+            while (curr && curr.offset >= f.bp) {
+                
+                curr.close();
+
+                if (curr.next) {
+                    curr.next.prev = curr.prev;
+                } else {
+                    upvalTail = upval.prev;
+                    if (upvalTail) {
+                        upvalTail.next = null;
+                    }
+                }
+
+                if (curr.prev) {
+                    curr.prev.next = curr.next;
+                } else {
+                    upvalHead = curr.next;
+                    if (upvalHead) {
+                        upvalHead.prev = null;
+                    }
+                }
+
+                curr = curr.prev;
+
+            }
+
+            // clear stack apart from result register - slow!
+            // (so we can be certain closures are not erroneously referencing the stack)
+            for (var i = f.bp + 1; i < stack.length; ++i) {
+                stack[i] = undefined;
+            }
+
             frames.pop();
             f = frames[frames.length-1];
-
-            // TODO: clear stack apart from result register
-            // (so we can be certain closures are not erroneously referencing the stack)
-
-            // TODO: iterate over all upvals visible from the root of this function
-            // and close them
             
             break;
         
         case OP_GET_UPVAL:
-            stack[f.bp + inst.targetRegister] = frame.upvals[inst.upval].get();
+            stack[f.bp + inst.targetRegister] = f.fn.upvals[inst.upval].get();
             break;
         case OP_SET_UPVAL:
-            frame.upvals[inst.upval].set(stack[f.bp + inst.sourceRegister]);
+            f.fn.upvals[inst.upval].set(stack[f.bp + inst.sourceRegister]);
             break;
         case OP_LOAD_CONSTANT:
             stack[f.bp + inst.targetRegister] = inst.value;
@@ -208,6 +262,9 @@ while (true) {
 
             break;
 
+        case OP_COPY:
+            stack[f.bp + inst.targetRegister] = stack[f.bp + inst.sourceRegister];
+            break;
         case OP_HALT:
             dumpState();
             process.exit(0);
